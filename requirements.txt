@@ -2,5 +2,4 @@ fastapi
 uvicorn
 httpx
 beautifulsoup4
-crawlee
-playwright
+crawlee[httpx]
