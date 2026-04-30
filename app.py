@@ -4,404 +4,309 @@ from uuid import uuid4
 import asyncio
 import os
 import logging
-import json
 from typing import Dict, Any, List, Optional, Set
 from urllib.parse import urlparse, urljoin, urldefrag
 from datetime import datetime
 import time
-import re
 
 # ====================== CONFIG & LOGGING ======================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format='%(asctime)s | %(levelname)-8s | %(message)s',
+    datefmt='%H:%M:%S'
 )
-logger = logging.getLogger("ultimate-crawler")
+logger = logging.getLogger("crawler")
 
-app = FastAPI(
-    title="Ultimate Web Crawler v5.0",
-    description="Advanced, production-grade crawler with smart link extraction and fallbacks",
-    version="5.0"
-)
+app = FastAPI(title="Web Crawler", version="5.0")
 
-# In-memory store (use Redis in production)
+# Store results
 results_store: Dict[str, Dict[str, Any]] = {}
 
 # ====================== MODELS ======================
 class CrawlRequest(BaseModel):
     url: str = Field(..., description="Starting URL")
     max_pages: int = Field(default=20, ge=1, le=100)
-    mode: str = Field(default="auto", pattern="^(auto|static|browser)$")
-    delay: float = Field(default=1.2, ge=0.3, le=5.0)
-    same_domain: bool = Field(default=True)
-    respect_robots: bool = Field(default=False)  # Future extension
-    max_depth: Optional[int] = Field(default=None, ge=1)
-
+    use_js: bool = Field(default=False, description="Use JavaScript rendering")
+    delay: float = Field(default=1.0, ge=0.3, le=3.0)
 
 # ====================== HELPER FUNCTIONS ======================
 def normalize_url(url: str) -> str:
-    """Clean and normalize URL properly"""
-    url = urldefrag(url)[0].rstrip('/')  # Remove fragment and trailing slash
+    """Clean and normalize URL"""
+    url = urldefrag(url)[0].rstrip('/')
     return url
-
 
 def is_same_domain(url1: str, url2: str) -> bool:
     return urlparse(url1).netloc.lower() == urlparse(url2).netloc.lower()
 
-
 def should_skip_url(url: str) -> bool:
-    """Advanced URL filtering"""
-    parsed = urlparse(url)
-    lower_url = url.lower()
-    
-    skip_extensions = {
-        '.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp',
-        '.zip', '.rar', '.tar', '.gz', '.exe', '.dmg', '.mp4',
-        '.css', '.js', '.json', '.xml', '.rss', '.atom'
-    }
-    
-    if any(lower_url.endswith(ext) for ext in skip_extensions):
-        return True
-    
-    # Skip common non-content paths
-    skip_patterns = [
-        r'/login', r'/signup', r'/auth', r'/account', r'/cart',
-        r'/checkout', r'/api/', r'/admin', r'/wp-admin', r'/feed',
-        r'/tag/', r'/category/', r'/page/\d+'
-    ]
-    
-    return any(re.search(pattern, lower_url) for pattern in skip_patterns)
+    """Skip images, videos, etc."""
+    skip_extensions = ('.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp',
+                       '.zip', '.rar', '.tar', '.gz', '.exe', '.mp4', '.mp3',
+                       '.css', '.js', '.json', '.xml')
+    return url.lower().endswith(skip_extensions)
 
-
-def log(job_id: str, message: str, level: str = "info"):
-    msg = f"[{job_id}] {message}"
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    
-    if job_id in results_store:
-        if "logs" not in results_store[job_id]:
-            results_store[job_id]["logs"] = []
-        results_store[job_id]["logs"].append(f"{datetime.now().strftime('%H:%M:%S')} - {message}")
-
-
-# ====================== STATIC CRAWLER (Recommended for most sites) ======================
+# ====================== STATIC CRAWLER (Works on Wikipedia, Hacker News, etc.) ======================
 async def crawl_static(
     job_id: str,
     start_url: str,
     max_pages: int,
-    delay: float,
-    same_domain: bool,
-    max_depth: Optional[int] = None
-) -> Dict[str, Any]:
+    delay: float
+) -> List[Dict]:
     
     import httpx
     from bs4 import BeautifulSoup
 
     results: List[Dict] = []
     visited: Set[str] = set()
-    queue: List[tuple[str, int]] = [(start_url, 0)]  # (url, depth)
-    base_domain = urlparse(start_url).netloc.lower()
-    total_links_found = 0
-
+    queue: List[str] = [start_url]
+    
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                      '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
     }
 
     async with httpx.AsyncClient(
         headers=headers,
         follow_redirects=True,
-        timeout=httpx.Timeout(25.0, connect=10.0),
-        verify=True,
-        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
+        timeout=30.0
     ) as client:
 
         while queue and len(results) < max_pages:
-            current_url, depth = queue.pop(0)
+            current_url = queue.pop(0)
             current_url = normalize_url(current_url)
 
             if current_url in visited:
                 continue
-
-            if same_domain and not is_same_domain(current_url, start_url):
-                continue
-
-            if max_depth and depth >= max_depth:
+            
+            if should_skip_url(current_url):
                 continue
 
             visited.add(current_url)
 
             try:
-                log(job_id, f"[{len(results)+1}/{max_pages}] Fetching → {current_url[:90]}")
+                logger.info(f"[{job_id}] [{len(results)+1}/{max_pages}] → {current_url[:80]}")
 
                 response = await client.get(current_url)
                 
                 if response.status_code != 200:
-                    log(job_id, f"HTTP {response.status_code} on {current_url}", "warning")
+                    logger.warning(f"[{job_id}] HTTP {response.status_code} on {current_url}")
                     continue
 
                 soup = BeautifulSoup(response.text, 'html.parser')
 
-                # Extract metadata
-                title = soup.find('title')
-                title_text = title.get_text(strip=True)[:200] if title else "No Title"
+                # Extract title
+                title_tag = soup.find('title')
+                title = title_tag.get_text(strip=True)[:200] if title_tag else "No Title"
 
-                meta_desc = soup.find('meta', attrs={'name': 'description'}) or \
-                           soup.find('meta', attrs={'property': 'og:description'})
-                description = meta_desc.get('content', '')[:350] if meta_desc else ""
+                # Extract description
+                meta_desc = soup.find('meta', attrs={'name': 'description'})
+                description = meta_desc.get('content', '')[:300] if meta_desc else ""
 
-                # Clean content
-                for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
-                    tag.decompose()
-
-                content_preview = soup.get_text(separator=' ', strip=True)[:550]
-
-                page_result = {
+                # Save result
+                results.append({
                     "url": current_url,
-                    "title": title_text,
+                    "title": title,
                     "description": description,
-                    "content_preview": content_preview,
-                    "status": "success",
-                    "status_code": response.status_code,
-                    "depth": depth
-                }
+                    "status": "success"
+                })
 
-                results.append(page_result)
-                log(job_id, f"✅ Success: {title_text[:70]}...")
+                # ==========================================================
+                # CRITICAL: FIND AND ADD NEW LINKS TO QUEUE
+                # ==========================================================
+                links_added = 0
+                for link in soup.find_all('a', href=True):
+                    if links_added >= 30:  # Limit per page
+                        break
+                        
+                    href = link['href'].strip()
+                    if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                        continue
 
-                # === ADVANCED LINK EXTRACTION ===
-                if len(results) < max_pages:
-                    added_this_page = 0
+                    full_url = normalize_url(urljoin(current_url, href))
                     
-                    for a_tag in soup.find_all('a', href=True):
-                        if added_this_page >= 25:  # Limit per page to avoid explosion
-                            break
-                            
-                        href = a_tag['href'].strip()
-                        if not href or href.startswith(('javascript:', 'mailto:', 'tel:')):
-                            continue
+                    # Only stay on same domain
+                    if not is_same_domain(full_url, start_url):
+                        continue
+                    
+                    if should_skip_url(full_url):
+                        continue
+                    
+                    if full_url not in visited and full_url not in queue:
+                        queue.append(full_url)
+                        links_added += 1
 
-                        full_url = normalize_url(urljoin(current_url, href))
-
-                        if should_skip_url(full_url):
-                            continue
-
-                        if same_domain and not is_same_domain(full_url, start_url):
-                            continue
-
-                        if full_url not in visited and full_url not in [u[0] for u in queue]:
-                            queue.append((full_url, depth + 1))
-                            added_this_page += 1
-                            total_links_found += 1
+                if links_added > 0:
+                    logger.info(f"[{job_id}] Found {links_added} new links. Queue size: {len(queue)}")
 
                 await asyncio.sleep(delay)
 
             except Exception as e:
-                log(job_id, f"Error fetching {current_url}: {str(e)[:100]}", "error")
+                logger.error(f"[{job_id}] Error on {current_url}: {str(e)[:80]}")
+                results.append({
+                    "url": current_url,
+                    "title": "Error",
+                    "description": str(e)[:200],
+                    "status": "failed"
+                })
 
-    return {
-        "mode": "static",
-        "results": results,
-        "links_found": total_links_found,
-        "pages_visited": len(visited)
-    }
+    return results
 
 
-# ====================== BROWSER CRAWLER (For heavy JS sites) ======================
+# ====================== BROWSER CRAWLER (For JavaScript-heavy sites) ======================
 async def crawl_browser(
     job_id: str,
     start_url: str,
     max_pages: int,
-    delay: float,
-    same_domain: bool,
-    max_depth: Optional[int] = None
-) -> Dict[str, Any]:
+    delay: float
+) -> List[Dict]:
     
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        log(job_id, "Playwright not installed. Run: pip install playwright && playwright install chromium", "error")
-        return {"mode": "browser", "results": [], "links_found": 0}
+        logger.error("[{}] Playwright not installed".format(job_id))
+        return []
 
     results: List[Dict] = []
     visited: Set[str] = set()
-    queue: List[tuple[str, int]] = [(start_url, 0)]
-    base_domain = urlparse(start_url).netloc.lower()
+    queue: List[str] = [start_url]
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-            ]
+            args=['--no-sandbox', '--disable-dev-shm-usage']
         )
-
+        
         context = await browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                       '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            viewport={'width': 1920, 'height': 1080}
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         )
-
+        
         page = await context.new_page()
 
         while queue and len(results) < max_pages:
-            current_url, depth = queue.pop(0)
+            current_url = queue.pop(0)
             current_url = normalize_url(current_url)
 
             if current_url in visited:
-                continue
-            if same_domain and not is_same_domain(current_url, start_url):
-                continue
-            if max_depth and depth >= max_depth:
                 continue
 
             visited.add(current_url)
 
             try:
-                log(job_id, f"[{len(results)+1}/{max_pages}] Browser → {current_url[:85]}")
+                logger.info(f"[{job_id}] [{len(results)+1}/{max_pages}] Browser → {current_url[:80]}")
 
-                await page.goto(current_url, wait_until='domcontentloaded', timeout=45000)
-                await asyncio.sleep(1.5)  # Allow JS to render
+                await page.goto(current_url, wait_until='domcontentloaded', timeout=30000)
+                await asyncio.sleep(1)  # Let JavaScript render
 
                 title = await page.title()
+                
+                # Get description
                 description = await page.evaluate("""() => {
-                    const meta = document.querySelector('meta[name="description"], meta[property="og:description"]');
+                    const meta = document.querySelector('meta[name="description"]');
                     return meta ? meta.content : '';
-                }""")
-
-                content_preview = await page.evaluate("""() => {
-                    const body = document.body.cloneNode(true);
-                    body.querySelectorAll('script, style, nav, footer, header, aside').forEach(el => el.remove());
-                    return body.innerText.substring(0, 550).replace(/\s+/g, ' ');
                 }""")
 
                 results.append({
                     "url": current_url,
-                    "title": (title or "No Title")[:200],
-                    "description": (description or "")[:350],
-                    "content_preview": content_preview,
-                    "status": "success",
-                    "depth": depth
+                    "title": title[:200] if title else "No Title",
+                    "description": description[:300] if description else "",
+                    "status": "success"
                 })
 
-                log(job_id, f"✅ Browser success: {title[:65]}...")
-
-                # Extract links using JavaScript (more accurate for JS-rendered links)
+                # Extract links
                 if len(results) < max_pages:
                     links = await page.evaluate("""() => {
                         return Array.from(document.querySelectorAll('a[href]'))
                             .map(a => a.href)
                             .filter(href => {
-                                if (!href || href.startsWith('javascript:') || 
-                                    href.startsWith('mailto:') || href.startsWith('#')) return false;
-                                return !/\\.(pdf|jpg|jpeg|png|gif|zip|rar|css|js)$/i.test(href);
+                                if (!href || href.startsWith('javascript:') || href.startsWith('mailto:')) return false;
+                                return true;
                             });
                     }""")
 
                     added = 0
-                    for link in links:
-                        if added >= 20:
-                            break
+                    for link in links[:50]:  # Limit per page
                         clean_link = normalize_url(link)
-                        if (same_domain and not is_same_domain(clean_link, start_url)) or should_skip_url(clean_link):
+                        if not is_same_domain(clean_link, start_url):
                             continue
-                        if clean_link not in visited and clean_link not in [u[0] for u in queue]:
-                            queue.append((clean_link, depth + 1))
+                        if should_skip_url(clean_link):
+                            continue
+                        if clean_link not in visited and clean_link not in queue:
+                            queue.append(clean_link)
                             added += 1
+
+                    if added > 0:
+                        logger.info(f"[{job_id}] Found {added} new links. Queue size: {len(queue)}")
 
                 await asyncio.sleep(delay)
 
             except Exception as e:
-                log(job_id, f"Browser error on {current_url}: {str(e)[:100]}", "error")
+                logger.error(f"[{job_id}] Browser error: {str(e)[:80]}")
+                results.append({
+                    "url": current_url,
+                    "title": "Error",
+                    "description": str(e)[:200],
+                    "status": "failed"
+                })
 
         await browser.close()
 
-    return {
-        "mode": "browser",
-        "results": results,
-        "links_found": len(visited) - 1,  # rough estimate
-        "pages_visited": len(visited)
-    }
+    return results
 
 
-# ====================== MAIN EXECUTOR WITH SMART FALLBACKS ======================
-async def execute_crawl_with_fallbacks(
+# ====================== MAIN EXECUTOR ======================
+async def execute_crawl(
     job_id: str,
     start_url: str,
     max_pages: int,
-    mode: str,
-    delay: float,
-    same_domain: bool,
-    max_depth: Optional[int]
+    use_js: bool,
+    delay: float
 ):
     start_time = time.time()
 
     try:
         results_store[job_id]["status"] = "running"
-        log(job_id, f"Starting crawl | Mode: {mode} | Max Pages: {max_pages}")
+        logger.info(f"[{job_id}] Starting crawl | JS: {use_js} | Max: {max_pages}")
 
-        result_data = None
-
-        if mode == "auto":
-            domain = urlparse(start_url).netloc.lower()
-            static_friendly = any(x in domain for x in ['wikipedia', 'github', 'stackoverflow', 'medium', 'dev.to'])
-
-            if static_friendly:
-                log(job_id, "Auto → Using STATIC mode first")
-                result_data = await crawl_static(job_id, start_url, max_pages, delay, same_domain, max_depth)
-            else:
-                log(job_id, "Auto → Trying BROWSER first")
-                result_data = await crawl_browser(job_id, start_url, max_pages, delay, same_domain, max_depth)
-
-        elif mode == "static":
-            result_data = await crawl_static(job_id, start_url, max_pages, delay, same_domain, max_depth)
-        elif mode == "browser":
-            result_data = await crawl_browser(job_id, start_url, max_pages, delay, same_domain, max_depth)
+        if use_js:
+            results = await crawl_browser(job_id, start_url, max_pages, delay)
+            mode_used = "browser"
+        else:
+            results = await crawl_static(job_id, start_url, max_pages, delay)
+            mode_used = "static"
 
         duration = round(time.time() - start_time, 2)
+        successful = len([r for r in results if r.get("status") == "success"])
 
         final_result = {
             "status": "completed",
-            "url": start_url,
-            "mode_used": result_data.get("mode", mode),
-            "total_found": len(result_data.get("results", [])),
-            "successful": len([r for r in result_data.get("results", []) if r.get("status") == "success"]),
-            "results": result_data.get("results", []),
-            "links_discovered": result_data.get("links_found", 0),
-            "pages_visited": result_data.get("pages_visited", 0),
+            "start_url": start_url,
+            "mode_used": mode_used,
+            "total_pages_crawled": len(results),
+            "successful_pages": successful,
+            "failed_pages": len(results) - successful,
+            "results": results,
             "duration_seconds": duration,
-            "completed_at": datetime.now().isoformat(),
-            "logs": results_store[job_id].get("logs", [])
+            "completed_at": datetime.now().isoformat()
         }
 
         results_store[job_id] = final_result
-        log(job_id, f"✅ CRAWL COMPLETED | {final_result['successful']} pages in {duration}s")
+        logger.info(f"[{job_id}] ✅ COMPLETED | {successful} pages in {duration}s")
 
     except Exception as e:
-        duration = round(time.time() - start_time, 2)
-        log(job_id, f"❌ CRAWL FAILED: {str(e)}", "error")
+        logger.error(f"[{job_id}] ❌ FAILED: {str(e)}")
         results_store[job_id] = {
-            "status": "error",
-            "url": start_url,
+            "status": "failed",
+            "start_url": start_url,
             "error": str(e),
-            "duration_seconds": duration,
-            "completed_at": datetime.now().isoformat(),
-            "logs": results_store[job_id].get("logs", [])
+            "duration_seconds": round(time.time() - start_time, 2),
+            "completed_at": datetime.now().isoformat()
         }
 
 
 # ====================== ROUTES ======================
 @app.post("/crawl")
 async def start_crawl(request: CrawlRequest, background_tasks: BackgroundTasks):
+    # Validate URL
     try:
         parsed = urlparse(request.url)
         if parsed.scheme not in ['http', 'https'] or not parsed.netloc:
@@ -413,24 +318,21 @@ async def start_crawl(request: CrawlRequest, background_tasks: BackgroundTasks):
 
     results_store[job_id] = {
         "status": "queued",
-        "url": request.url,
-        "mode": request.mode,
+        "start_url": request.url,
         "max_pages": request.max_pages,
-        "created_at": datetime.now().isoformat(),
-        "logs": []
+        "use_js": request.use_js,
+        "created_at": datetime.now().isoformat()
     }
 
     background_tasks.add_task(
-        execute_crawl_with_fallbacks,
-        job_id, request.url, request.max_pages, request.mode,
-        request.delay, request.same_domain, request.max_depth
+        execute_crawl,
+        job_id, request.url, request.max_pages, request.use_js, request.delay
     )
 
     return {
         "job_id": job_id,
-        "status": "accepted",
-        "message": "Crawl started successfully",
-        "check_results": f"/results/{job_id}"
+        "message": f"Crawl started. Will crawl up to {request.max_pages} pages",
+        "check_url": f"/results/{job_id}"
     }
 
 
@@ -448,8 +350,8 @@ async def list_jobs():
         "jobs": {
             jid: {
                 "status": data.get("status"),
-                "url": data.get("url", "")[:80],
-                "found": data.get("total_found", 0),
+                "url": data.get("start_url", "")[:60],
+                "pages": data.get("total_pages_crawled", 0),
                 "created_at": data.get("created_at")
             }
             for jid, data in results_store.items()
@@ -460,15 +362,21 @@ async def list_jobs():
 @app.get("/")
 async def root():
     return {
-        "message": "🕷️ Ultimate Web Crawler v5.0 - Advanced Edition",
-        "features": [
-            "Smart link normalization & deduplication",
-            "Depth control",
-            "Advanced URL filtering",
-            "Better fallback logic",
-            "Improved static + browser modes"
-        ]
+        "message": "Web Crawler API",
+        "endpoints": {
+            "/": "This help",
+            "/health": "Health check",
+            "/docs": "Interactive API docs",
+            "/crawl": "POST - Start crawl",
+            "/results": "GET - List all crawls",
+            "/results/{job_id}": "GET - Get specific crawl results"
+        }
     }
+
+
+@app.get("/health")
+async def health():
+    return {"status": "alive", "timestamp": datetime.now().isoformat()}
 
 
 if __name__ == "__main__":
