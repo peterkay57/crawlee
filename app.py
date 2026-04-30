@@ -8,6 +8,8 @@ from typing import Dict, Any, List, Optional, Set
 from urllib.parse import urlparse, urljoin, urldefrag
 from datetime import datetime
 import time
+import httpx
+from bs4 import BeautifulSoup
 
 # ====================== CONFIG & LOGGING ======================
 logging.basicConfig(
@@ -45,7 +47,7 @@ def should_skip_url(url: str) -> bool:
                        '.css', '.js', '.json', '.xml')
     return url.lower().endswith(skip_extensions)
 
-# ====================== STATIC CRAWLER (Works on Wikipedia, Hacker News, etc.) ======================
+# ====================== STATIC CRAWLER ======================
 async def crawl_static(
     job_id: str,
     start_url: str,
@@ -53,9 +55,6 @@ async def crawl_static(
     delay: float
 ) -> List[Dict]:
     
-    import httpx
-    from bs4 import BeautifulSoup
-
     results: List[Dict] = []
     visited: Set[str] = set()
     queue: List[str] = [start_url]
@@ -111,11 +110,11 @@ async def crawl_static(
                 })
 
                 # ==========================================================
-                # CRITICAL: FIND AND ADD NEW LINKS TO QUEUE
+                # FIND AND ADD NEW LINKS TO QUEUE
                 # ==========================================================
                 links_added = 0
                 for link in soup.find_all('a', href=True):
-                    if links_added >= 30:  # Limit per page
+                    if links_added >= 30:
                         break
                         
                     href = link['href'].strip()
@@ -152,7 +151,7 @@ async def crawl_static(
     return results
 
 
-# ====================== BROWSER CRAWLER (For JavaScript-heavy sites) ======================
+# ====================== BROWSER CRAWLER ======================
 async def crawl_browser(
     job_id: str,
     start_url: str,
@@ -163,7 +162,7 @@ async def crawl_browser(
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        logger.error("[{}] Playwright not installed".format(job_id))
+        logger.error(f"[{job_id}] Playwright not installed")
         return []
 
     results: List[Dict] = []
@@ -195,11 +194,10 @@ async def crawl_browser(
                 logger.info(f"[{job_id}] [{len(results)+1}/{max_pages}] Browser → {current_url[:80]}")
 
                 await page.goto(current_url, wait_until='domcontentloaded', timeout=30000)
-                await asyncio.sleep(1)  # Let JavaScript render
+                await asyncio.sleep(1)
 
                 title = await page.title()
                 
-                # Get description
                 description = await page.evaluate("""() => {
                     const meta = document.querySelector('meta[name="description"]');
                     return meta ? meta.content : '';
@@ -212,7 +210,6 @@ async def crawl_browser(
                     "status": "success"
                 })
 
-                # Extract links
                 if len(results) < max_pages:
                     links = await page.evaluate("""() => {
                         return Array.from(document.querySelectorAll('a[href]'))
@@ -224,7 +221,7 @@ async def crawl_browser(
                     }""")
 
                     added = 0
-                    for link in links[:50]:  # Limit per page
+                    for link in links[:50]:
                         clean_link = normalize_url(link)
                         if not is_same_domain(clean_link, start_url):
                             continue
