@@ -1,19 +1,18 @@
 from flask import Flask, request, jsonify
-from crawler import crawl_website
+from crawler import crawl_and_scrape
 from uuid import uuid4
+import asyncio
 
 app = Flask(__name__)
-
-# Store results
 results_store = {}
 
 @app.route('/')
 def home():
     return {
-        'message': 'Simple Crawler API',
+        'message': 'Universal Crawler + Scraper API',
         'endpoints': {
             '/health': 'GET - Health check',
-            '/crawl': 'POST - Start crawl',
+            '/crawl': 'POST - Start crawl (max 100 pages)',
             '/results/<id>': 'GET - Get results'
         }
     }
@@ -26,15 +25,21 @@ def health():
 def start_crawl():
     data = request.get_json()
     url = data.get('url')
-    max_pages = data.get('max_pages', 10)
+    max_pages = data.get('max_pages', 50)
     
     if not url:
         return jsonify({'error': 'url required'}), 400
     
+    # Limit to 100 pages
+    if max_pages > 100:
+        max_pages = 100
+    
     job_id = str(uuid4())[:8]
     
-    # Run crawl
-    results = crawl_website(url, max_pages)
+    # Run async crawler
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    results = loop.run_until_complete(crawl_and_scrape(url, max_pages))
     
     results_store[job_id] = {
         'status': 'completed',
@@ -45,7 +50,7 @@ def start_crawl():
     
     return jsonify({
         'job_id': job_id,
-        'message': f'Crawled {len(results)} pages',
+        'message': f'Crawled and scraped {len(results)} pages',
         'check_url': f'/results/{job_id}'
     })
 
