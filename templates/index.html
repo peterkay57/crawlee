@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Universal Crawler - Scrape Any Website</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🕷️ Universal Crawler</h1>
+            <p>Enter any URL to crawl and scrape websites</p>
+        </header>
+
+        <div class="input-section">
+            <input type="text" id="urlInput" placeholder="https://example.com" class="url-input">
+            <input type="number" id="maxPages" placeholder="Max pages" value="10" class="pages-input">
+            <button id="crawlBtn" class="crawl-button">🚀 Start Crawling</button>
+        </div>
+
+        <div id="loading" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Crawling... This may take a few minutes.</p>
+        </div>
+
+        <div id="results" class="results"></div>
+    </div>
+
+    <script>
+        const crawlBtn = document.getElementById('crawlBtn');
+        const urlInput = document.getElementById('urlInput');
+        const maxPages = document.getElementById('maxPages');
+        const loading = document.getElementById('loading');
+        const resultsDiv = document.getElementById('results');
+
+        crawlBtn.addEventListener('click', async () => {
+            const url = urlInput.value.trim();
+            const pages = maxPages.value;
+
+            if (!url) {
+                alert('Please enter a URL');
+                return;
+            }
+
+            loading.style.display = 'flex';
+            resultsDiv.innerHTML = '';
+
+            try {
+                const response = await fetch('/crawl', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: url, max_pages: parseInt(pages) })
+                });
+
+                const data = await response.json();
+                loading.style.display = 'none';
+
+                if (data.error) {
+                    resultsDiv.innerHTML = `<div class="error">❌ Error: ${data.error}</div>`;
+                    return;
+                }
+
+                displayResults(data);
+            } catch (error) {
+                loading.style.display = 'none';
+                resultsDiv.innerHTML = `<div class="error">❌ Error: ${error.message}</div>`;
+            }
+        });
+
+        function displayResults(data) {
+            let html = `<div class="summary">
+                <h3>📊 Crawl Summary</h3>
+                <p><strong>Job ID:</strong> ${data.job_id}</p>
+                <p><strong>Total pages crawled:</strong> ${data.total_pages}</p>
+                <p><strong>Check results at:</strong> <code>${data.check_url}</code></p>
+            </div>`;
+
+            html += `<div class="results-list">
+                <h3>📄 Results Preview (first 3 pages)</h3>`;
+
+            const previewResults = data.results.slice(0, 3);
+            for (const page of previewResults) {
+                html += `
+                    <div class="result-card">
+                        <h4>${escapeHtml(page.title || 'No title')}</h4>
+                        <p class="url"><a href="${page.url}" target="_blank">${page.url}</a></p>
+                        <p class="text">${escapeHtml(page.text_content?.substring(0, 300) || 'No content')}...</p>
+                    </div>
+                `;
+            }
+
+            html += `<p><a href="${data.check_url}" target="_blank" class="view-all">🔗 View all ${data.total_pages} pages →</a></p>`;
+            html += `</div>`;
+
+            resultsDiv.innerHTML = html;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
