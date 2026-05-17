@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from crawler import crawl_and_scrape
 from uuid import uuid4
 import asyncio
@@ -11,11 +11,16 @@ def home():
     return {
         'message': 'Universal Crawler + Scraper API',
         'endpoints': {
+            '/web': 'GET - Beautiful web interface',
             '/health': 'GET - Health check',
             '/crawl': 'POST - Start crawl (max 100 pages)',
             '/results/<id>': 'GET - Get results'
         }
     }
+
+@app.route('/web')
+def web_interface():
+    return render_template('index.html')
 
 @app.route('/health')
 def health():
